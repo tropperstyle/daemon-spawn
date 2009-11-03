@@ -1,4 +1,4 @@
-require "fileutils"
+require 'fileutils'
 
 # Large portions of this were liberally stolen from the
 # 'simple-daemon' project at http://simple-daemon.rubyforge.org/
@@ -24,7 +24,7 @@ module DaemonSpawn
     end
 
     if daemon.alive? && daemon.singleton
-      STDERR.puts "An instance of #{daemon.classname} is already " +
+      STDERR.puts "An instance of #{daemon.app_name} is already " +
         "running (PID #{daemon.pid})"
       exit 1
     end
@@ -43,7 +43,7 @@ module DaemonSpawn
       trap("TERM") {daemon.stop; exit}
       daemon.start(args)
     end
-    puts "#{daemon.classname} started."
+    puts "#{daemon.app_name} started."
   end
 
   def self.stop(daemon) #:nodoc:
@@ -64,21 +64,23 @@ module DaemonSpawn
 
   def self.status(daemon) #:nodoc:
     if daemon.alive?
-      puts "#{daemon.classname} is running (PID #{PidFile.recall(daemon)})"
+      puts "#{daemon.app_name} is running (PID #{daemon.pid})"
     else
-      puts "#{daemon.classname} is NOT running"
+      puts "#{daemon.app_name} is NOT running"
     end
   end
 
   class Base
-    attr_accessor :log_file, :pid_file, :sync_log, :working_dir, :singleton
+    attr_accessor :log_file, :pid_file, :sync_log, :working_dir, :app_name, :singleton, :index
 
-    def initialize(opts={ })
-      raise "You must specify a :working_dir" unless opts[:working_dir]
+    def initialize(opts = {})
+      raise 'You must specify a :working_dir' unless opts[:working_dir]
       self.working_dir = opts[:working_dir]
-
-      self.log_file = opts[:log_file] || File.join(self.working_dir, 'logs', self.classname + '.log')
-      self.pid_file = opts[:pid_file] || File.join(self.working_dir, 'run', self.classname + '.pid')
+      self.index = opts[:index] || 0
+      self.app_name = opts[:application] || classname
+      extension = index == 0 ? '.pid' : ".#{index}.pid"
+      self.pid_file = opts[:pid_file] || File.join(working_dir, 'tmp', 'pids', app_name + extension)
+      self.log_file = opts[:log_file] || File.join(working_dir, 'logs', app_name + '.log')
       self.sync_log = opts[:sync_log]
       self.singleton = opts[:singleton] || false
     end
@@ -115,6 +117,22 @@ module DaemonSpawn
     def pid #:nodoc:
       IO.read(self.pid_file).to_i rescue nil
     end
+    
+    def self.build(options)
+      count = options.delete(:processes) || 1
+      daemons = []
+      count.times do |index|
+        daemons << new(options.merge(:index => index))
+      end
+      daemons
+    end
+
+    def self.find(options)
+      pid_file = new(options).pid_file
+      basename = File.basename(pid_file).split('.').first
+      pid_files = Dir.glob(File.join(File.dirname(pid_file), "#{basename}.*"))
+      pid_files.map { |f| new(options.merge(:pid_file => f)) }
+    end
 
     # Invoke this method to process command-line args and dispatch
     # appropriately. Valid options include the following _symbols_:
@@ -127,25 +145,27 @@ module DaemonSpawn
     # args must begin with 'start', 'stop', 'status', or 'restart'.
     # The first token will be removed and any remaining arguments
     # passed to the daemon's start method.
-    def self.spawn!(opts={ }, args=ARGV)
+    def self.spawn!(opts = {}, args = ARGV)
       case args.size > 0 && args.shift
       when 'start'
-        daemon = self.new(opts)
-        DaemonSpawn.start(daemon, args)
+        daemons = build(opts)
+        daemons.map { |d| DaemonSpawn.start(d, args) }
       when 'stop'
-        daemon = self.new(opts)
-        DaemonSpawn.stop(daemon)
+        daemons = find(opts)
+        daemons.map { |d| DaemonSpawn.stop(d) }
       when 'status'
-        daemon = self.new(opts)
-        if daemon.alive?
-          puts "#{daemon.classname} is running (#{daemon.pid})"
+        daemons = find(opts)
+        if daemons.blank?
+          puts 'No PIDs found'
         else
-          puts "#{daemon.classname} is NOT running"
+          daemons.map { |d| DaemonSpawn.status(d) }
         end
       when 'restart'
-        daemon = self.new(opts)
-        DaemonSpawn.stop(daemon)
-        DaemonSpawn.start(daemon, args)
+        daemons = find(opts)
+        daemons.map do |daemon|
+          DaemonSpawn.stop(daemon)
+          DaemonSpawn.start(daemon, args)
+        end
       when '-h', '--help', 'help'
         DaemonSpawn.usage
         exit
